@@ -62,6 +62,15 @@ if (!defined('HAVE_PHP_SQL_CREATOR')) {
             case "UPDATE":
                 $this->created = $this->processUpdateStatement($parsed);
                 break;
+            case "DESC":
+                $this->created = $this->processDescStatement($parsed);
+                break;
+            case "SHOW":
+                $this->created = $this->processShowStatement($parsed);
+                break;
+            case "REPLACE":
+                $this->created = $this->processReplaceStatment($parsed);
+                break;
             default:
                 throw new UnsupportedFeatureException($k);
                 break;
@@ -92,8 +101,13 @@ if (!defined('HAVE_PHP_SQL_CREATOR')) {
         }
 
         protected function processDeleteStatement($parsed) {
-            return $this->processDELETE($parsed['DELETE']) . " " . $this->processFROM($parsed['FROM']) . " "
+            $sql = $this->processDELETE($parsed['DELETE']) . " " . $this->processFROM($parsed['FROM']) . " "
                     . $this->processWHERE($parsed['WHERE']);
+            if (isset($parsed['LIMIT'])) {
+                $sql .= " " . $this->processLIMIT($parsed['LIMIT']);
+            }
+
+            return $sql;
         }
 
         protected function processUpdateStatement($parsed) {
@@ -104,12 +118,30 @@ if (!defined('HAVE_PHP_SQL_CREATOR')) {
             return $sql;
         }
 
+        protected function processDescStatement($parsed) {
+            $sql = $this->processDESC($parsed['DESC']);
+            return $sql;
+        }
+
+        protected function processShowStatement($parsed){
+            $sql = $this->processSHOW($parsed['SHOW']);
+
+            return $sql;
+        }
+
+        protected function processReplaceStatment($parsed){
+            $sql = $this->processREPLACE($parsed['REPLACE']) . " " . $this->processVALUES($parsed['VALUES']);
+
+            return $sql;
+        }
+
         protected function processDELETE($parsed) {
             $sql = "DELETE";
-            foreach ($parsed['TABLES'] as $k => $v) {
-                $sql .= $v . ",";
-            }
-            return substr($sql, 0, -1);
+            // foreach ($parsed['TABLES'] as $k => $v) {
+            //     $sql .= $v . ",";
+            // }
+            // return substr($sql, 0, -1);
+            return $sql;
         }
 
         protected function processSELECT($parsed) {
@@ -118,6 +150,7 @@ if (!defined('HAVE_PHP_SQL_CREATOR')) {
                 $len = strlen($sql);
                 $sql .= $this->processColRef($v);
                 $sql .= $this->processSelectExpression($v);
+                $sql .= $this->processSelectBracketExpression($v);
                 $sql .= $this->processFunction($v);
                 $sql .= $this->processConstant($v);
 
@@ -154,6 +187,7 @@ if (!defined('HAVE_PHP_SQL_CREATOR')) {
                 $len = strlen($sql);
                 $sql .= $this->processOrderByAlias($v);
                 $sql .= $this->processColRef($v);
+                $sql .= $this->processFunction($v);
 
                 if ($len == strlen($sql)) {
                     throw new UnableToCreateSQLException('ORDER', $k, $v, 'expr_type');
@@ -228,14 +262,14 @@ if (!defined('HAVE_PHP_SQL_CREATOR')) {
         }
 
         protected function processINSERT($parsed) {
-            $sql = "INSERT INTO " . $parsed['table'];
+            $sql = "INSERT INTO " . $parsed[0]['table'];
 
-            if ($parsed['columns'] === false) {
+            if ($parsed[0]['columns'] === false) {
                 return $sql;
             }
 
             $columns = "";
-            foreach ($parsed['columns'] as $k => $v) {
+            foreach ($parsed[0]['columns'] as $k => $v) {
                 $len = strlen($columns);
                 $columns .= $this->processColRef($v);
 
@@ -256,6 +290,70 @@ if (!defined('HAVE_PHP_SQL_CREATOR')) {
 
         protected function processUPDATE($parsed) {
             return "UPDATE " . $parsed[0]['table'];
+        }
+
+        protected function processDESC($parsed) {
+            $sql = "";
+            foreach ($parsed as $k => $v) {
+                $len = strlen($sql);
+                $sql .= $this->processTable($v, $k);
+                $sql .= $this->processTableExpression($v, $k);
+
+                if ($len == strlen($sql)) {
+                    throw new UnableToCreateSQLException('DESC', $k, $v, 'expr_type');
+                }
+
+                $sql .= " ";
+            }
+            return "DESC " . substr($sql, 0, -1);
+        }
+
+        protected function processSHOW($parsed){
+            $show = $parsed;
+            $sql = "";
+            foreach($show as $k => $v){
+                $len = strlen($sql);
+                $sql .= $this->processReserved($v);
+                $sql .= $this->processConstant($v);
+                $sql .= $this->processFunction($v);
+                $sql .= $this->processTable($v, 0);
+
+                if ($len == strlen($sql)) {
+                    throw new UnableToCreateSQLException('SHOW', $k, $v, 'expr_type');
+                }
+                
+                $sql .= " ";
+            }
+
+            $sql = substr($sql, 0, -1);
+            return "SHOW " . $sql;
+        }
+
+        protected function processREPLACE($parsed){
+            $sql = "REPLACE INTO " . $parsed[0]['table'];
+
+            if ($parsed[0]['columns'] === false) {
+                return $sql;
+            }
+
+            $columns = "";
+            foreach ($parsed[0]['columns'] as $k => $v) {
+                $len = strlen($columns);
+                $columns .= $this->processColRef($v);
+
+                if ($len == strlen($columns)) {
+                    throw new UnableToCreateSQLException('INSERT[columns]', $k, $v, 'expr_type');
+                }
+
+                $columns .= ",";
+            }
+
+            if ($columns !== "") {
+                $columns = " (" . substr($columns, 0, -1) . ")";
+            }
+
+            $sql .= $columns;
+            return $sql;
         }
 
         protected function processSetExpression($parsed) {
@@ -408,6 +506,7 @@ if (!defined('HAVE_PHP_SQL_CREATOR')) {
                 $sql .= $this->processFunction($v);
                 $sql .= $this->processConstant($v);
                 $sql .= $this->processColRef($v);
+                $sql .= $this->processSelectExpression($v);
                 $sql .= $this->processReserved($v);
 
                 if ($len == strlen($sql)) {
@@ -416,7 +515,7 @@ if (!defined('HAVE_PHP_SQL_CREATOR')) {
 
                 $sql .= ($this->isReserved($v) ? " " : ",");
             }
-            return $parsed['base_expr'] . "(" . substr($sql, 0, -1) . ")";
+            return $parsed['base_expr'] . "(" . substr($sql, 0, -1) . ") ".$parsed['alias']['base_expr'];
         }
 
         protected function processSelectExpression($parsed) {
@@ -444,11 +543,13 @@ if (!defined('HAVE_PHP_SQL_CREATOR')) {
             $sql = "";
             foreach ($parsed['sub_tree'] as $k => $v) {
                 $len = strlen($sql);
+                $sql .= $this->processColRef($v);
                 $sql .= $this->processFunction($v);
                 $sql .= $this->processOperator($v);
                 $sql .= $this->processConstant($v);
                 $sql .= $this->processSubQuery($v);
                 $sql .= $this->processSelectBracketExpression($v);
+                $sql .= $this->processReserved($v);
 
                 if ($len == strlen($sql)) {
                     throw new UnableToCreateSQLException('expression subtree', $k, $v, 'expr_type');

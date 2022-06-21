@@ -285,6 +285,14 @@ if (!defined('HAVE_PHP_SQL_PARSER')) {
                     $token_category = $upper;
                     break;
 
+                case 'DESC':
+                    if ($token_category === '') {
+                        // short version of DESCRIBE
+                        $token_category = $upper;
+                    }
+                    // else direction of ORDER-BY
+                    break;
+
                 case 'DATABASE':
                 case 'SCHEMA':
                     if ($prev_category === 'DROP') {
@@ -330,6 +338,17 @@ if (!defined('HAVE_PHP_SQL_PARSER')) {
                     }
                     break;
 
+                case 'SHOW':
+                    $token_category = $upper;
+                    break;
+
+                case 'CREATE':
+                    if ($prev_category === 'SHOW') {
+                        break;
+                    }
+                    $token_category = $upper;
+                    break;
+
                 /* These tokens get their own section, but have no subclauses.
                  These tokens identify the statement but have no specific subclauses of their own. */
                 case 'DELETE':
@@ -337,12 +356,10 @@ if (!defined('HAVE_PHP_SQL_PARSER')) {
                 case 'INSERT':
                 case 'REPLACE':
                 case 'TRUNCATE':
-                case 'CREATE':
                 case 'TRUNCATE':
                 case 'OPTIMIZE':
                 case 'GRANT':
                 case 'REVOKE':
-                case 'SHOW':
                 case 'HANDLER':
                 case 'LOAD':
                 case 'ROLLBACK':
@@ -555,6 +572,12 @@ if (!defined('HAVE_PHP_SQL_PARSER')) {
             }
             if (!empty($out['DROP'])) {
                 $out['DROP'] = $this->processDrop($out['DROP']);
+            }
+            if (!empty($out['DESC'])){
+                $out['DESC'] = $this->processDesc($out['DESC']);
+            }
+            if (!empty($out['SHOW'])){
+                $out['SHOW'] = $this->processShow($out['SHOW']);
             }
             return $out;
         }
@@ -1049,7 +1072,7 @@ if (!defined('HAVE_PHP_SQL_PARSER')) {
                 return false;
             }
 
-            $parseInfo['expr'] = trim($this->revokeEscaping($parseInfo['expr']));
+            // $parseInfo['expr'] = trim($this->revokeEscaping($parseInfo['expr']));
 
             if (is_numeric($parseInfo['expr'])) {
                 $parseInfo['type'] = ExpressionType::POSITION;
@@ -1237,15 +1260,66 @@ if (!defined('HAVE_PHP_SQL_PARSER')) {
 
                         # if we have a colref followed by a parenthesis pair,
                         # it isn't a colref, it is a user-function
+
+                        $localExpr = new ExpressionToken();
+                        $tmpExprList = array();
+
                         foreach ($localTokenList as $k => $v) {
                             $tmpToken = new ExpressionToken($k, $v);
-                            if ($tmpToken->isCommaToken()) {
-                                unset($localTokenList[$k]);
+                            // if ($tmpToken->isCommaToken()) {
+                            //     unset($localTokenList[$k]);
+                            // }
+                            if (!$tmpToken->isCommaToken()) {
+                                $localExpr->addToken($v);
+                                $tmpExprList[] = $v;
+                            } else {
+                                $tmpExprList = array_values($tmpExprList);
+                                $localExprList = $this->process_expr_list($tmpExprList);
+
+                                if (count($localExprList) > 1) {
+                                    $localExpr->setSubTree($localExprList);
+                                    $localExpr->setTokenType(ExpressionType::EXPRESSION);
+                                    $localExprList = $localExpr->toArray();
+                                    $localExprList['alias'] = false;
+                                    $localExprList = array($localExprList);
+                                }
+
+                                if (!$curr->getSubTree()) {
+                                    if (!empty($localExprList)) {
+                                        $curr->setSubTree($localExprList);
+                                    }
+                                } else {
+                                    $tmpExprList = $curr->getSubTree();
+                                    $curr->setSubTree(array_merge($tmpExprList, $localExprList));
+                                }
+    
+                                $tmpExprList = array();
+                                $localExpr = new ExpressionToken();
                             }
                         }
 
-                        $localTokenList = array_values($localTokenList);
-                        $curr->setSubTree($this->process_expr_list($localTokenList));
+                        $tmpExprList = array_values($tmpExprList);
+                        $localExprList = $this->process_expr_list($tmpExprList);
+
+                        if (count($localExprList) > 1) {
+                            $localExpr->setSubTree($localExprList);
+                            $localExpr->setTokenType(ExpressionType::EXPRESSION);
+                            $localExprList = $localExpr->toArray();
+                            $localExprList['alias'] = false;
+                            $localExprList = array($localExprList);
+                        }
+
+                        if (!$curr->getSubTree()) {
+                            if (!empty($localExprList)) {
+                                $curr->setSubTree($localExprList);
+                            }
+                        } else {
+                            $tmpExprList = $curr->getSubTree();
+                            $curr->setSubTree(array_merge($tmpExprList, $localExprList));
+                        }
+
+                        // $localTokenList = array_values($localTokenList);
+                        // $curr->setSubTree($this->process_expr_list($localTokenList));
 
                         $prev->setSubTree($curr->getSubTree());
                         if ($prev->isColumnReference()) {
@@ -1459,7 +1533,7 @@ if (!defined('HAVE_PHP_SQL_PARSER')) {
          * This method handles REPLACE statements.
          */
         private function processReplace($tokenList) {
-            return $this->processInsert($tokenList, 'REPLACE');
+            return $this->processInsertOrReplace($tokenList, 'REPLACE');
         }
 
         /**
@@ -1618,6 +1692,124 @@ if (!defined('HAVE_PHP_SQL_PARSER')) {
             }
 
             return array('option' => $option, 'warning' => $warning, 'object_list' => $resultList);
+        }
+
+        private function processDesc($tokenList) {
+
+            $base_expr = "";
+            $expr = array();
+            $currCategory = "";
+
+            foreach($tokenList as $token){
+                $trim = trim($token);
+                
+                if ($trim === '') {
+                    continue;
+                }
+
+                $expr[] = array('expr_type' => ExpressionType::TABLE, 'table' => $trim,
+                                'alias' => false, 'base_expr' => $trim);
+            }
+
+            return empty($expr) ? null : $expr;
+        }
+
+        private function processShow($tokenList){
+            $resultList = array();
+            $category = "";
+            $prev = "";
+
+            foreach($tokenList as $k => $token){
+                $upper = strtoupper(trim($token));
+
+                if (trim($token) === '') {
+                    continue;
+                }
+                
+                switch($upper){
+                    case 'FROM':
+                        $resultList[] = array('expr_type' => ExpressionType::RESERVED, 'base_expr' => trim($token));
+                        if ($prev === 'INDEX' || $prev === 'COLUMNS') {
+                            break;
+                        }
+                        $category = $upper;
+                        break;
+
+                    case 'CREATE':
+                    case 'DATABASE':
+                    case 'SCHEMA':
+                    case 'FUNCTION':
+                    case 'PROCEDURE':
+                    case 'ENGINE':
+                    case 'TABLE':
+                    case 'FOR':
+                    case 'LIKE':
+                    case 'INDEX':
+                    case 'COLUMNS':
+                    case 'PLUGIN':
+                    case 'PRIVILEGES':
+                    case 'PROCESSLIST':
+                    case 'LOGS':
+                    case 'STATUS':
+                    case 'GLOBAL':
+                    case 'SESSION':
+                    case 'FULL':
+                    case 'GRANTS':
+                    case 'INNODB':
+                    case 'STORAGE':
+                    case 'ENGINES':
+                    case 'OPEN':
+                    case 'BDB':
+                    case 'TRIGGERS':
+                    case 'VARIABLES':
+                    case 'DATABASES':
+                    case 'SCHEMAS':
+                    case 'ERRORS':
+                    case 'TABLES':
+                    case 'WARNINGS':
+                    case 'CHARACTER':
+                    case 'SET':
+                    case 'COLLATION':
+                        $resultList[] = array('expr_type' => ExpressionType::RESERVED, 'base_expr' => trim($token));
+                        $category = $upper;
+                        break;
+
+                    default:
+                        switch($prev){
+                            case 'LIKE':
+                                $resultList[] = array('expr_type' => ExpressionType::CONSTANT, 'base_expr' => $token);
+                                break;
+                            case 'FROM':
+                            case 'SCHEMA':
+                            case 'DATABASE':
+                                $resultList[] = array('expr_type' => ExpressionType::DATABASE, 'name' => $token,
+                                                        'base_expr' => $token);
+                                break;
+                            case 'INDEX':
+                            case 'COLUMNS':
+                            case 'TABLE':
+                                $resultList[] = array('expr_type' => ExpressionType::TABLE, 'table' => $token,
+                                                        'base_expr' => $token);
+                                $category = "TABLENAME";
+                                break;
+                            case 'FUNCTION':
+                                if ($this->isAggregateFunction($upper)) {
+                                    $expr_type = ExpressionType::AGGREGATE_FUNCTION;
+                                } else {
+                                    $expr_type = ExpressionType::SIMPLE_FUNCTION;
+                                }
+                                $resultList[] = array('expr_type' => $expr_type, 'name' => $token,
+                                                        'base_expr' => $token);
+                                break;
+                            default:
+                                // ignore
+                                break;
+                        }
+                        break;
+                }
+                $prev = $category;
+            }
+            return $resultList;
         }
     }
     define('HAVE_PHP_SQL_PARSER', 1);
